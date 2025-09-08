@@ -11,23 +11,21 @@ package llmflow
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/internal/flow"
+	"trpc.group/trpc-go/trpc-agent-go/internal/flow/processor"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/session"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
-	"trpc.group/trpc-go/trpc-agent-go/tool/transfer"
 )
 
 // mockAgent implements agent.Agent for testing
@@ -150,6 +148,7 @@ type mockResponseProcessor struct{}
 func (m *mockResponseProcessor) ProcessResponse(
 	ctx context.Context,
 	invocation *agent.Invocation,
+	req *model.Request,
 	resp *model.Response,
 	ch chan<- *event.Event,
 ) {
@@ -464,7 +463,9 @@ func runParallelToolTest(t *testing.T, tc parallelTestCase) {
 
 	// Run test with specified parallel setting
 	startTime := time.Now()
-	eventChan, err := New(nil, nil, Options{EnableParallelTools: !tc.disableParallel}).Run(ctx, invocation)
+	var responseProcessors []flow.ResponseProcessor
+	responseProcessors = append(responseProcessors, processor.NewFunctionCallResponseProcessor())
+	eventChan, err := New(nil, responseProcessors, Options{EnableParallelTools: !tc.disableParallel}).Run(ctx, invocation)
 
 	if tc.expectError {
 		require.Error(t, err)
@@ -536,7 +537,9 @@ func TestFlow_SingleToolExecution_UsesSerialPath(t *testing.T) {
 		},
 	}
 
-	llmFlow := New(nil, nil, Options{})
+	var responseProcessors []flow.ResponseProcessor
+	responseProcessors = append(responseProcessors, processor.NewFunctionCallResponseProcessor())
+	llmFlow := New(nil, responseProcessors, Options{})
 
 	// Create a mock agent with the tools
 	mockAgentWithToolsList := []tool.Tool{tool1}
@@ -648,7 +651,9 @@ func TestFlow_EnableParallelTools_ForcesSerialExecution(t *testing.T) {
 
 	// Test with EnableParallelTools = false (default)
 	startTime := time.Now()
-	eventChan, err := New(nil, nil, Options{EnableParallelTools: false}).Run(ctx, invocation)
+	var responseProcessors []flow.ResponseProcessor
+	responseProcessors = append(responseProcessors, processor.NewFunctionCallResponseProcessor())
+	eventChan, err := New(nil, responseProcessors, Options{EnableParallelTools: false}).Run(ctx, invocation)
 	require.NoError(t, err)
 
 	var toolCallEvent *event.Event
@@ -748,83 +753,6 @@ func TestFlow_ParallelToolExecution_Unified(t *testing.T) {
 			runParallelToolTest(t, tc)
 		})
 	}
-}
-
-func TestExecuteToolCall_MapsSubAgentToTransfer(t *testing.T) {
-	ctx := context.Background()
-	f := New(nil, nil, Options{})
-
-	// Prepare invocation with a parent agent that has a sub-agent named weather-agent.
-	inv := &agent.Invocation{
-		AgentName: "coordinator",
-		Agent: &mockTransferAgent{
-			subAgents: []agent.Agent{
-				&mockTransferSubAgent{info: &mockTransferAgentInfo{name: "weather-agent"}},
-			},
-		},
-	}
-
-	// Prepare tools: only transfer tool is exposed, no weather-agent tool.
-	capturedArgs := make([]byte, 0)
-	tools := map[string]tool.Tool{
-		transfer.TransferToolName: &mockTransferCallableTool{
-			declaration: &tool.Declaration{Name: transfer.TransferToolName, Description: "transfer"},
-			callFn: func(_ context.Context, args []byte) (any, error) {
-				capturedArgs = append(capturedArgs[:0], args...)
-				return map[string]any{"ok": true}, nil
-			},
-		},
-	}
-
-	// Original tool call uses sub-agent name directly.
-	originalArgs := []byte(`{"message":"What's the weather like in Tokyo?"}`)
-	pc := model.ToolCall{
-		ID: "call-1",
-		Function: model.FunctionDefinitionParam{
-			Name:      "weather-agent",
-			Arguments: originalArgs,
-		},
-	}
-
-	choice, err := f.executeToolCall(ctx, inv, pc, tools, 0)
-	require.NoError(t, err)
-	require.NotNil(t, choice)
-
-	// The tool name should have been mapped to transfer_to_agent by the time execution happens.
-	// Returned Tool choice stores content only; we verify the captured args passed to our mock tool.
-	var got transfer.Request
-	require.NoError(t, json.Unmarshal(capturedArgs, &got))
-	assert.Equal(t, "weather-agent", got.AgentName)
-	assert.Equal(t, "What's the weather like in Tokyo?", got.Message)
-	assert.Equal(t, false, got.EndInvocation)
-}
-
-func TestExecuteToolCall_ToolNotFound_ReturnsErrorChoice(t *testing.T) {
-	ctx := context.Background()
-	f := New(nil, nil, Options{})
-
-	// Invocation without matching sub-agent and with a mock model to satisfy logging.
-	inv := &agent.Invocation{
-		AgentName: "coordinator",
-		Agent:     &mockTransferAgent{subAgents: nil},
-		Model:     &mockModel{},
-	}
-
-	tools := map[string]tool.Tool{} // No tools available.
-
-	pc2 := model.ToolCall{
-		ID: "call-404",
-		Function: model.FunctionDefinitionParam{
-			Name:      "non-existent-tool",
-			Arguments: []byte(`{}`),
-		},
-	}
-
-	choice, err := f.executeToolCall(ctx, inv, pc2, tools, 0)
-	require.NoError(t, err)
-	require.NotNil(t, choice)
-	assert.Equal(t, ErrorToolNotFound, choice.Message.Content)
-	assert.Equal(t, "call-404", choice.Message.ToolID)
 }
 
 // --- Test helpers used above ---

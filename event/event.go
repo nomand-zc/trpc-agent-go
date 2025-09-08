@@ -77,6 +77,20 @@ func (e *Event) Clone() *Event {
 	return &clone
 }
 
+// IsFinalResponse checks if the event is a final response.
+func (e *Event) IsFinalResponse() bool {
+	if e == nil {
+		return true
+	}
+
+	if e.Response.HasToolCalls() {
+		return false
+	}
+
+	// Consider response final if it's marked as done and has content or error.
+	return e.Done && (len(e.Choices) > 0 || e.Error != nil)
+}
+
 // Option is a function that can be used to configure the Event.
 type Option func(*Event)
 

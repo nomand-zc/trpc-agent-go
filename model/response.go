@@ -167,6 +167,11 @@ func (r *Response) Clone() *Response {
 	return &clone
 }
 
+// HasToolCalls checks if the response contains tool calls.
+func (rsp *Response) HasToolCalls() bool {
+	return len(rsp.Choices) > 0 && len(rsp.Choices[0].Message.ToolCalls) > 0
+}
+
 // ResponseError represents an error response from the API.
 type ResponseError struct {
 	// Message is the error message.
