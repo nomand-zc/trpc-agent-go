@@ -11,6 +11,7 @@ package processor
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -96,9 +97,10 @@ func TestExecuteToolCall_MapsSubAgentToTransfer(t *testing.T) {
 	}
 
 	choice, err := p.executeToolCall(ctx, inv, pc, tools, 0)
+	res, _ := json.Marshal("Tokyo'weather is good")
 	require.NoError(t, err)
 	require.NotNil(t, choice)
-	assert.Equal(t, "Tokyo'weather is good", choice.Message.Content)
+	assert.Equal(t, string(res), choice.Message.Content)
 }
 
 func TestExecuteToolCall_ToolNotFound_ReturnsErrorChoice(t *testing.T) {
