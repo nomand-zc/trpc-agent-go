@@ -198,6 +198,7 @@ func (f *Flow) processStreamingResponses(
 		// 4. Create and send LLM response using the clean constructor.
 		llmResponseEvent := f.createLLMResponseEvent(invocation, response, llmRequest)
 		eventChan <- llmResponseEvent
+		lastEvent = llmResponseEvent
 
 		// 5. Check context cancellation.
 		if err := f.checkContextCancelled(ctx); err != nil {

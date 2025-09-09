@@ -107,28 +107,21 @@ func (p *TransferResponseProcessor) ProcessResponse(
 	targetInvocation := &agent.Invocation{
 		Agent:             targetAgent,
 		AgentName:         targetAgent.Info().Name,
+		Branch:            invocation.Branch,
 		InvocationID:      invocation.InvocationID, // Keep same invocation ID for continuity
-		EndInvocation:     transferInfo.EndInvocation,
 		Session:           invocation.Session,
-		Model:             invocation.Model,
 		EventCompletionCh: invocation.EventCompletionCh,
 		RunOptions:        invocation.RunOptions,
-		TransferInfo:      nil, // Clear transfer info for target agent
+		Message:           invocation.Message,
+		ArtifactService:   invocation.ArtifactService,
+	}
+	if targetInvocation.Branch == "" {
+		targetInvocation.Branch = invocation.AgentName
 	}
 
-	// Set the message for the target agent.
-	if transferInfo.Message != "" {
-		targetInvocation.Message = model.Message{
-			Role:    model.RoleUser,
-			Content: transferInfo.Message,
-		}
-	} else {
-		// Use the original message if no specific message for target agent.
-		targetInvocation.Message = invocation.Message
-	}
-
+	targetCtx := agent.NewInvocationContext(ctx, targetInvocation)
 	// Actually call the target agent's Run method.
-	targetEventChan, err := targetAgent.Run(ctx, targetInvocation)
+	targetEventChan, err := targetAgent.Run(targetCtx, targetInvocation)
 	if err != nil {
 		log.Errorf("Failed to run target agent '%s': %v", targetAgent.Info().Name, err)
 		// Send error event.
@@ -157,10 +150,6 @@ func (p *TransferResponseProcessor) ProcessResponse(
 
 	// Clear the transfer info from the original invocation.
 	invocation.TransferInfo = nil
-
-	// Update the original invocation to reflect the transfer.
-	invocation.Agent = targetAgent
-	invocation.AgentName = targetAgent.Info().Name
 	// Always end the original invocation after transfer.
 	invocation.EndInvocation = true
 }
