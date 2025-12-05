@@ -60,7 +60,9 @@ func TestRegisterTools_AddsToolSet(t *testing.T) {
 
 	kb := &fakeKnowledge{}
 
-	all, userToolNames := registerTools(&Options{Tools: direct, ToolSets: []tool.ToolSet{ts}, Knowledge: kb})
+	a := New("test-agent", WithTools(direct), WithToolSets([]tool.ToolSet{ts}), WithKnowledge(kb), WithRefreshToolSetsOnRun(false))
+	a.registerTools()
+	all, userToolNames := a.tools, a.userToolNames
 
 	// Expect 1 direct + 1 from set + 1 knowledge search tool.
 	require.Equal(t, 3, len(all))

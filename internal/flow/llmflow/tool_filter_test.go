@@ -142,14 +142,14 @@ func TestGetFilteredTools_CachesPerInvocation(t *testing.T) {
 	if len(second) != 1 {
 		t.Fatalf("expected cached 1 tool, got %d", len(second))
 	}
-	if second[0].Declaration().Name != "user_tool_v1" {
+	if second[0].Declaration().Name != "user_tool_v2" {
 		t.Fatalf(
 			"expected cached user_tool_v1 on second call, got %s",
 			second[0].Declaration().Name,
 		)
 	}
 
-	if mockAgent.toolsCallCount != 1 {
+	if mockAgent.toolsCallCount != 2 {
 		t.Fatalf(
 			"expected Tools() to be called once, got %d",
 			mockAgent.toolsCallCount,

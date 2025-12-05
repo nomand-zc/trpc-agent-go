@@ -74,8 +74,6 @@ type LLMAgent struct {
 // New creates a new LLMAgent with the given options.
 func New(name string, opts ...Option) *LLMAgent {
 	options := defaultOptions
-
-	// Apply function options.
 	for _, opt := range opts {
 		opt(&options)
 	}
@@ -93,25 +91,16 @@ func New(name string, opts ...Option) *LLMAgent {
 		}
 	}
 
-	// Register tools from both tools and toolsets, including knowledge search tool if provided.
-	// Also track which tools are user-registered (via WithTools) for filtering purposes.
-	tools, userToolNames := registerTools(&options)
-
-	// Initialize models map and determine the initial model.
-	initialModel, models := initializeModels(&options)
-
 	// Construct the agent first so request processors can access dynamic getters.
 	a := &LLMAgent{
 		name:                 name,
-		model:                initialModel,
-		models:               models,
+		model:                options.Model,
+		models:               make(map[string]model.Model),
 		description:          options.Description,
 		instruction:          options.Instruction,
 		systemPrompt:         options.GlobalInstruction,
 		genConfig:            options.GenerationConfig,
 		codeExecutor:         options.codeExecutor,
-		tools:                tools,
-		userToolNames:        userToolNames,
 		planner:              options.Planner,
 		subAgents:            options.SubAgents,
 		agentCallbacks:       options.AgentCallbacks,
@@ -123,40 +112,17 @@ func New(name string, opts ...Option) *LLMAgent {
 		option:               options,
 	}
 
+	// Initialize models map and determine the initial model.
+	a.initializeModels()
+
+	// load tools if needed
+	if !options.RefreshToolSetsOnRun {
+		a.registerTools()
+	}
+
 	// Prepare request processors in the correct order, wiring dynamic getters.
-	requestProcessors := buildRequestProcessorsWithAgent(a, &options)
-
-	// Prepare response processors.
-	var responseProcessors []flow.ResponseProcessor
-
-	// Add planning response processor if planner is configured.
-	if options.Planner != nil {
-		planningResponseProcessor := processor.NewPlanningResponseProcessor(options.Planner)
-		responseProcessors = append(responseProcessors, planningResponseProcessor)
-	}
-
-	responseProcessors = append(responseProcessors, processor.NewCodeExecutionResponseProcessor())
-
-	// Add output response processor if output_key or output_schema is configured or structured output is requested.
-	if options.OutputKey != "" || options.OutputSchema != nil || options.StructuredOutput != nil {
-		orp := processor.NewOutputResponseProcessor(options.OutputKey, options.OutputSchema)
-		responseProcessors = append(responseProcessors, orp)
-	}
-
-	toolcallProcessor := processor.NewFunctionCallResponseProcessor(options.EnableParallelTools, options.ToolCallbacks)
-	// Configure default transfer message for direct sub-agent calls.
-	// Default behavior (when not configured): enabled with built-in default message.
-	if options.DefaultTransferMessage != nil {
-		// Explicitly configured via WithDefaultTransferMessage.
-		processor.SetDefaultTransferMessage(*options.DefaultTransferMessage)
-	}
-	responseProcessors = append(responseProcessors, toolcallProcessor)
-
-	// Add transfer response processor if sub-agents are configured.
-	if len(options.SubAgents) > 0 {
-		transferResponseProcessor := processor.NewTransferResponseProcessor(options.EndInvocationAfterTransfer)
-		responseProcessors = append(responseProcessors, transferResponseProcessor)
-	}
+	requestProcessors := a.buildRequestProcessors()
+	responseProcessors := a.buildResponseProcessors()
 
 	// Create flow with the provided processors and options.
 	flowOpts := llmflow.Options{
@@ -172,33 +138,69 @@ func New(name string, opts ...Option) *LLMAgent {
 	return a
 }
 
+func (a *LLMAgent) buildResponseProcessors() []flow.ResponseProcessor {
+	// Prepare response processors.
+	var responseProcessors []flow.ResponseProcessor
+
+	// Add planning response processor if planner is configured.
+	if a.option.Planner != nil {
+		planningResponseProcessor := processor.NewPlanningResponseProcessor(a.option.Planner)
+		responseProcessors = append(responseProcessors, planningResponseProcessor)
+	}
+
+	responseProcessors = append(responseProcessors, processor.NewCodeExecutionResponseProcessor())
+
+	// Add output response processor if output_key or output_schema is configured or structured output is requested.
+	if a.option.OutputKey != "" || a.option.OutputSchema != nil || a.option.StructuredOutput != nil {
+		orp := processor.NewOutputResponseProcessor(a.option.OutputKey, a.option.OutputSchema)
+		responseProcessors = append(responseProcessors, orp)
+	}
+
+	toolcallProcessor := processor.NewFunctionCallResponseProcessor(a.option.EnableParallelTools, a.option.ToolCallbacks)
+	// Configure default transfer message for direct sub-agent calls.
+	// Default behavior (when not configured): enabled with built-in default message.
+	if a.option.DefaultTransferMessage != nil {
+		// Explicitly configured via WithDefaultTransferMessage.
+		processor.SetDefaultTransferMessage(*a.option.DefaultTransferMessage)
+	}
+	responseProcessors = append(responseProcessors, toolcallProcessor)
+
+	// Add transfer response processor if sub-agents are configured.
+	if len(a.option.SubAgents) > 0 {
+		transferResponseProcessor := processor.NewTransferResponseProcessor(a.option.EndInvocationAfterTransfer)
+		responseProcessors = append(responseProcessors, transferResponseProcessor)
+	}
+
+	return responseProcessors
+}
+
 // buildRequestProcessors constructs the request processors in the required order.
-func buildRequestProcessorsWithAgent(a *LLMAgent, options *Options) []flow.RequestProcessor {
+func (a *LLMAgent) buildRequestProcessors() []flow.RequestProcessor {
 	var requestProcessors []flow.RequestProcessor
 
 	// 1. Basic processor - handles generation config.
 	basicOptions := []processor.BasicOption{
-		processor.WithGenerationConfig(options.GenerationConfig),
+		processor.WithGenerationConfig(a.option.GenerationConfig),
 	}
 	basicProcessor := processor.NewBasicRequestProcessor(basicOptions...)
 	requestProcessors = append(requestProcessors, basicProcessor)
 
 	// 2. Planning processor - handles planning instructions if planner is configured.
-	if options.Planner != nil {
-		planningProcessor := processor.NewPlanningRequestProcessor(options.Planner)
+	if a.option.Planner != nil {
+		planningProcessor := processor.NewPlanningRequestProcessor(a.option.Planner)
 		requestProcessors = append(requestProcessors, planningProcessor)
 	}
 
 	// 3. Instruction processor - adds instruction content and system prompt.
-	if options.Instruction != "" || options.GlobalInstruction != "" ||
-		(options.StructuredOutput != nil && options.StructuredOutput.JSONSchema != nil) {
+	if a.option.Instruction != "" || a.option.GlobalInstruction != "" ||
+		(a.option.StructuredOutput != nil && a.option.StructuredOutput.JSONSchema != nil) {
 		instructionOpts := []processor.InstructionRequestProcessorOption{
-			processor.WithOutputSchema(options.OutputSchema),
+			processor.WithOutputSchema(a.option.OutputSchema),
 		}
 		// Fallback injection for structured output when the provider doesn't enforce JSON Schema natively.
-		if options.StructuredOutput != nil && options.StructuredOutput.JSONSchema != nil {
+		if a.option.StructuredOutput != nil && a.option.StructuredOutput.JSONSchema != nil {
 			instructionOpts = append(instructionOpts,
-				processor.WithStructuredOutputSchema(options.StructuredOutput.JSONSchema.Schema),
+				processor.WithStructuredOutputSchema(a.option.StructuredOutput.JSONSchema.Schema),
 			)
 		}
 		// Always wire dynamic getters so instructions can be updated at runtime.
@@ -215,21 +217,21 @@ func buildRequestProcessorsWithAgent(a *LLMAgent, options *Options) []flow.Reque
 	}
 
 	// 4. Identity processor - sets agent identity.
-	if a.name != "" || options.Description != "" {
+	if a.name != "" || a.option.Description != "" {
 		identityProcessor := processor.NewIdentityRequestProcessor(
 			a.name,
-			options.Description,
-			processor.WithAddNameToInstruction(options.AddNameToInstruction),
+			a.option.Description,
+			processor.WithAddNameToInstruction(a.option.AddNameToInstruction),
 		)
 		requestProcessors = append(requestProcessors, identityProcessor)
 	}
 
 	// 5. Time processor - adds current time information if enabled.
-	if options.AddCurrentTime {
+	if a.option.AddCurrentTime {
 		timeProcessor := processor.NewTimeRequestProcessor(
 			processor.WithAddCurrentTime(true),
-			processor.WithTimezone(options.Timezone),
-			processor.WithTimeFormat(options.TimeFormat),
+			processor.WithTimezone(a.option.Timezone),
+			processor.WithTimeFormat(a.option.TimeFormat),
 		)
 		requestProcessors = append(requestProcessors, timeProcessor)
 	}
@@ -238,138 +240,112 @@ func buildRequestProcessorsWithAgent(a *LLMAgent, options *Options) []flow.Reque
 	// when a skills repository is configured. This ensures the model
 	// sees available skills (names/descriptions) and any loaded
 	// SKILL.md/doc texts before deciding on tool calls.
-	if options.SkillsRepository != nil {
+	if a.option.SkillsRepository != nil {
 		skillsProcessor := processor.NewSkillsRequestProcessor(
-			options.SkillsRepository,
+			a.option.SkillsRepository,
 		)
 		requestProcessors = append(requestProcessors, skillsProcessor)
 	}
 
 	// 7. Content processor - appends conversation/context history.
 	contentProcessor := processor.NewContentRequestProcessor(
-		processor.WithAddContextPrefix(options.AddContextPrefix),
-		processor.WithAddSessionSummary(options.AddSessionSummary),
-		processor.WithMaxHistoryRuns(options.MaxHistoryRuns),
-		processor.WithPreserveSameBranch(options.PreserveSameBranch),
-		processor.WithTimelineFilterMode(options.messageTimelineFilterMode),
-		processor.WithBranchFilterMode(options.messageBranchFilterMode),
+		processor.WithAddContextPrefix(a.option.AddContextPrefix),
+		processor.WithAddSessionSummary(a.option.AddSessionSummary),
+		processor.WithMaxHistoryRuns(a.option.MaxHistoryRuns),
+		processor.WithPreserveSameBranch(a.option.PreserveSameBranch),
+		processor.WithTimelineFilterMode(a.option.messageTimelineFilterMode),
+		processor.WithBranchFilterMode(a.option.messageBranchFilterMode),
 	)
 	requestProcessors = append(requestProcessors, contentProcessor)
 
 	return requestProcessors
 }
 
-// buildRequestProcessors preserves the original helper signature for tests and
-// legacy callers. It constructs a temporary agent instance and forwards to
-// buildRequestProcessorsWithAgent. Dynamic updates are not supported when using
-// this legacy function; use New() which wires the real agent for runtime getters.
-func buildRequestProcessors(name string, options *Options) []flow.RequestProcessor { // nolint:deadcode
-	dummy := &LLMAgent{
-		name:         name,
-		instruction:  options.Instruction,
-		systemPrompt: options.GlobalInstruction,
-	}
-	return buildRequestProcessorsWithAgent(dummy, options)
-}
-
 // initializeModels initializes the models map and determines the initial
 // model based on WithModel and WithModels options.
-func initializeModels(options *Options) (model.Model, map[string]model.Model) {
-	models := make(map[string]model.Model)
-
+func (a *LLMAgent) initializeModels() {
 	// Case 1: No models configured at all.
-	if options.Model == nil && len(options.Models) == 0 {
-		return nil, models
+	if a.option.Model == nil && len(a.option.Models) == 0 {
+		return
 	}
 
 	// Case 2: Only WithModel is set, no WithModels.
-	if len(options.Models) == 0 {
-		models[defaultModelName] = options.Model
-		return options.Model, models
+	if len(a.option.Models) == 0 {
+		a.models[defaultModelName] = a.option.Model
+		return
 	}
 
-	// Case 3: WithModels is set (with or without WithModel).
-	models = options.Models
-
+	a.models = a.option.Models
 	// If WithModel is also set, use it as the initial model.
-	if options.Model != nil {
+	if a.option.Model != nil {
 		// Check if the model is already in the models map.
 		found := false
-		for _, m := range models {
-			if m == options.Model {
+		for _, m := range a.option.Models {
+			if m == a.option.Model {
 				found = true
 				break
 			}
 		}
 		// If not found, add it with the default name.
 		if !found {
-			models[defaultModelName] = options.Model
+			a.models[defaultModelName] = a.option.Model
 		}
-		return options.Model, models
+		return
 	}
 
 	// WithModels is set but WithModel is not, use the first model from map.
 	// Note: map iteration order is not guaranteed.
-	for _, m := range models {
-		return m, models
+	for _, m := range a.option.Models {
+		a.model = m
+		break
 	}
-
-	// Should not reach here, but return nil for safety.
-	return nil, models
 }
 
-func registerTools(options *Options) ([]tool.Tool, map[string]bool) {
+func (a *LLMAgent) registerTools() {
 	// Track user-registered tool names from WithTools and WithToolSets.
 	// These are tools explicitly registered by the user and can be subject to filtering.
 	userToolNames := make(map[string]bool)
 
 	// Tools from WithTools are user tools.
-	for _, t := range options.Tools {
+	for _, t := range a.option.Tools {
 		userToolNames[t.Declaration().Name] = true
 	}
 
 	// Start with direct tools.
-	allTools := make([]tool.Tool, 0, len(options.Tools))
-	allTools = append(allTools, options.Tools...)
+	allTools := make([]tool.Tool, 0, len(a.option.Tools))
+	allTools = append(allTools, a.option.Tools...)
 
-	// Add tools from each toolset with automatic namespacing when using
-	// static ToolSets. Tools from WithToolSets are also user tools
-	// (user explicitly added them). When RefreshToolSetsOnRun is true,
-	// ToolSets are resolved on each Tools() call instead of here.
-	if !options.RefreshToolSetsOnRun {
-		ctx := context.Background()
-		for _, toolSet := range options.ToolSets {
-			// Create named toolset wrapper to avoid name conflicts.
-			namedToolSet := itool.NewNamedToolSet(toolSet)
-			setTools := namedToolSet.Tools(ctx)
-			for _, t := range setTools {
-				allTools = append(allTools, t)
-				// Mark toolset tools as user tools.
-				userToolNames[t.Declaration().Name] = true
-			}
+	for _, toolSet := range a.option.ToolSets {
+		// Create named toolset wrapper to avoid name conflicts.
+		namedToolSet := itool.NewNamedToolSet(toolSet)
+		setTools := namedToolSet.Tools(context.Background())
+		for _, t := range setTools {
+			allTools = append(allTools, t)
+			// Mark toolset tools as user tools.
+			userToolNames[t.Declaration().Name] = true
 		}
 	}
 
 	// Add knowledge search tool if knowledge base is provided.
 	// This is a FRAMEWORK tool (auto-added by framework), NOT a user tool.
 	// It should never be filtered out by user tool filters.
-	if options.Knowledge != nil {
+	if a.option.Knowledge != nil {
 		toolOpts := []knowledgetool.Option{
-			knowledgetool.WithFilter(options.KnowledgeFilter),
+			knowledgetool.WithFilter(a.option.KnowledgeFilter),
 		}
-		if options.KnowledgeConditionedFilter != nil {
-			toolOpts = append(toolOpts, knowledgetool.WithConditionedFilter(options.KnowledgeConditionedFilter))
+		if a.option.KnowledgeConditionedFilter != nil {
+			toolOpts = append(toolOpts, knowledgetool.WithConditionedFilter(a.option.KnowledgeConditionedFilter))
 		}
 
-		if options.EnableKnowledgeAgenticFilter {
+		if a.option.EnableKnowledgeAgenticFilter {
 			agenticKnowledge := knowledgetool.NewAgenticFilterSearchTool(
-				options.Knowledge, options.AgenticFilterInfo, toolOpts...,
+				a.option.Knowledge, a.option.AgenticFilterInfo, toolOpts...,
 			)
 			allTools = append(allTools, agenticKnowledge)
 			// Do NOT add to userToolNames - this is a framework tool.
 		} else {
 			knowledgeTool := knowledgetool.NewKnowledgeSearchTool(
-				options.Knowledge, toolOpts...,
+				a.option.Knowledge, toolOpts...,
 			)
 			allTools = append(allTools, knowledgeTool)
 			// Do NOT add to userToolNames - this is a framework tool.
@@ -377,24 +353,36 @@ func registerTools(options *Options) ([]tool.Tool, map[string]bool) {
 	}
 
 	// Add skill tools when skills are enabled.
-	if options.SkillsRepository != nil {
+	if a.option.SkillsRepository != nil {
 		allTools = append(allTools,
-			toolskill.NewLoadTool(options.SkillsRepository))
+			toolskill.NewLoadTool(a.option.SkillsRepository))
 		// Specialized doc tools for clarity and control.
 		allTools = append(allTools,
-			toolskill.NewSelectDocsTool(options.SkillsRepository))
+			toolskill.NewSelectDocsTool(a.option.SkillsRepository))
 		allTools = append(allTools,
-			toolskill.NewListDocsTool(options.SkillsRepository))
+			toolskill.NewListDocsTool(a.option.SkillsRepository))
 		// Provide executor to skill_run, fallback to local.
-		exec := options.codeExecutor
+		exec := a.option.codeExecutor
 		if exec == nil {
 			exec = defaultCodeExecutor()
 		}
 		allTools = append(allTools,
-			toolskill.NewRunTool(options.SkillsRepository, exec))
+			toolskill.NewRunTool(a.option.SkillsRepository, exec))
 	}
 
-	return allTools, userToolNames
+	// Add transfer tool
+	if len(a.subAgents) > 0 {
+		agentInfos := make([]agent.Info, len(a.subAgents))
+		for i, subAgent := range a.subAgents {
+			agentInfos[i] = subAgent.Info()
+		}
+
+		transferTool := transfer.New(agentInfos)
+		allTools = append(allTools, transferTool)
+	}
+
+	a.tools = allTools
+	a.userToolNames = userToolNames
 }
 
 // Run implements the agent.Agent interface.
@@ -498,6 +486,15 @@ func (a *LLMAgent) setupInvocation(invocation *agent.Invocation) {
 	// Propagate structured output configuration into invocation and request path.
 	invocation.StructuredOutputType = a.structuredOutputType
 	invocation.StructuredOutput = a.structuredOutput
+
+	// load tools if needed
+	if a.option.RefreshToolSetsOnRun {
+		a.registerTools()
+	}
+	invocation.SetState(llmflow.StateKeyToolsSnapshot, &agent.CacheTools{
+		Tools:         a.tools,
+		UserToolNames: a.userToolNames,
+	})
 }
 
 // wrapEventChannel wraps the event channel to apply after agent callbacks.
@@ -592,57 +589,21 @@ func (a *LLMAgent) Info() agent.Info {
 	}
 }
 
-// getAllToolsLocked builds the full tool list.
-// It combines user tools with framework tools like transfer_to_agent
-// under the caller's read lock. It always returns a fresh slice so
-// callers can safely use it after releasing the lock without data
-// races.
-func (a *LLMAgent) getAllToolsLocked() []tool.Tool {
-	base := make([]tool.Tool, len(a.tools))
-	copy(base, a.tools)
-
-	// When RefreshToolSetsOnRun is enabled, rebuild tools from ToolSets
-	// on each call to keep ToolSet-provided tools in sync with their
-	// underlying dynamic source (for example, MCP ListTools).
-	if a.option.RefreshToolSetsOnRun && len(a.option.ToolSets) > 0 {
-		ctx := context.Background()
-
-		dynamic := make([]tool.Tool, 0)
-		for _, toolSet := range a.option.ToolSets {
-			namedToolSet := itool.NewNamedToolSet(toolSet)
-			setTools := namedToolSet.Tools(ctx)
-			dynamic = append(dynamic, setTools...)
-		}
-
-		if len(dynamic) > 0 {
-			combined := make([]tool.Tool, 0, len(base)+len(dynamic))
-			combined = append(combined, base...)
-			combined = append(combined, dynamic...)
-			base = combined
-		}
-	}
-
-	if len(a.subAgents) == 0 {
-		return base
-	}
-
-	agentInfos := make([]agent.Info, len(a.subAgents))
-	for i, subAgent := range a.subAgents {
-		agentInfos[i] = subAgent.Info()
-	}
-
-	transferTool := transfer.New(agentInfos)
-	return append(base, transferTool)
-}
-
 // Tools implements the agent.Agent interface.
 // It returns the list of tools available to the agent, including
 // transfer tools.
 func (a *LLMAgent) Tools() []tool.Tool {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
+	// load the latest tool list
+	if a.option.RefreshToolSetsOnRun {
+		a.registerTools()
+	}
 
-	return a.getAllToolsLocked()
+	base := make([]tool.Tool, len(a.tools))
+	copy(base, a.tools)
+
+	return base
 }
 
 // SubAgents returns the list of sub-agents for this agent.
@@ -690,35 +651,14 @@ func (a *LLMAgent) FindSubAgent(name string) agent.Agent {
 func (a *LLMAgent) UserTools() []tool.Tool {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-
-	// When ToolSets are static, user tool tracking is based on the
-	// snapshot captured at construction time.
-	if !a.option.RefreshToolSetsOnRun {
-		userTools := make([]tool.Tool, 0, len(a.userToolNames))
-		for _, t := range a.tools {
-			if a.userToolNames[t.Declaration().Name] {
-				userTools = append(userTools, t)
-			}
-		}
-		return userTools
-	}
-
-	// When ToolSets are refreshed on each run, user tools include:
-	//   - Tools from WithTools (tracked in userToolNames)
-	//   - Tools coming from ToolSets (wrapped as NamedTool).
-	// Framework tools (knowledge_search, transfer_to_agent, etc.)
-	// remain excluded.
-	allTools := a.getAllToolsLocked()
-	userTools := make([]tool.Tool, 0, len(allTools))
-
-	for _, t := range allTools {
+	userTools := make([]tool.Tool, 0, len(a.tools))
+	for _, t := range a.tools {
 		name := t.Declaration().Name
 
 		if a.userToolNames[name] {
 			userTools = append(userTools, t)
 			continue
 		}
-
 		if _, ok := t.(*itool.NamedTool); ok {
 			userTools = append(userTools, t)
 		}
@@ -731,32 +671,23 @@ func (a *LLMAgent) UserTools() []tool.Tool {
 // function.
 func (a *LLMAgent) FilterTools(ctx context.Context) []tool.Tool {
 	a.mu.RLock()
-	tools := a.getAllToolsLocked()
+	tools := a.Tools()
 	userToolNames := make(map[string]bool, len(a.userToolNames))
 	for name, isUser := range a.userToolNames {
 		userToolNames[name] = isUser
 	}
-	refreshToolSets := a.option.RefreshToolSetsOnRun
-	filter := a.option.toolFilter
 	a.mu.RUnlock()
 
 	filtered := make([]tool.Tool, 0, len(tools))
+	filter := a.option.toolFilter
 	for _, t := range tools {
 		name := t.Declaration().Name
 		isUser := userToolNames[name]
-
-		if refreshToolSets {
-			if _, ok := t.(*itool.NamedTool); ok {
-				isUser = true
-			}
+		if _, ok := t.(*itool.NamedTool); ok {
+			isUser = true
 		}
 
-		if !isUser {
-			filtered = append(filtered, t)
-			continue
-		}
-
-		if filter == nil || filter(ctx, t) {
+		if !isUser || filter == nil || filter(ctx, t) {
 			filtered = append(filtered, t)
 		}
 	}
@@ -780,14 +711,6 @@ func (a *LLMAgent) SetSubAgents(subAgents []agent.Agent) {
 	a.mu.Unlock()
 }
 
-// refreshToolsLocked recomputes the aggregated tool list and user tool
-// tracking map from the current options. Caller must hold a.mu.Lock.
-func (a *LLMAgent) refreshToolsLocked() {
-	tools, userToolNames := registerTools(&a.option)
-	a.tools = tools
-	a.userToolNames = userToolNames
-}
-
 // AddToolSet adds or replaces a tool set at runtime in a
 // concurrency-safe way. If another ToolSet with the same Name()
 // already exists, it will be replaced. Subsequent invocations see the
@@ -796,12 +719,10 @@ func (a *LLMAgent) AddToolSet(toolSet tool.ToolSet) {
 	if toolSet == nil {
 		return
 	}
-
-	name := toolSet.Name()
-
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	name := toolSet.Name()
 	replaced := false
 	for i, ts := range a.option.ToolSets {
 		if name != "" && ts.Name() == name {
@@ -813,8 +734,7 @@ func (a *LLMAgent) AddToolSet(toolSet tool.ToolSet) {
 	if !replaced {
 		a.option.ToolSets = append(a.option.ToolSets, toolSet)
 	}
-
-	a.refreshToolsLocked()
+	a.registerTools()
 }
 
 // RemoveToolSet removes all tool sets whose Name() matches the given
@@ -842,9 +762,7 @@ func (a *LLMAgent) RemoveToolSet(name string) bool {
 		return false
 	}
 	a.option.ToolSets = dst
-
-	a.refreshToolsLocked()
-
+	a.registerTools()
 	return true
 }
 
@@ -862,8 +780,7 @@ func (a *LLMAgent) SetToolSets(toolSets []tool.ToolSet) {
 		copy(copied, toolSets)
 		a.option.ToolSets = copied
 	}
-
-	a.refreshToolsLocked()
+	a.registerTools()
 }
 
 // SetModel sets the model for this agent in a concurrency-safe way.

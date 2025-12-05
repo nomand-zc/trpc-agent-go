@@ -34,12 +34,12 @@ const (
 	// Timeout for event completion signaling.
 	eventCompletionTimeout = 5 * time.Second
 
-	// stateKeyToolsSnapshot is the invocation state key used to cache the
+	// StateKeyToolsSnapshot is the invocation state key used to cache the
 	// final tool list for a single Invocation. This ensures that the tool
 	// set (including ToolSet-based tools and filters) stays stable for the
 	// entire lifetime of an Invocation, even when underlying ToolSets are
 	// dynamic.
-	stateKeyToolsSnapshot = "llmflow:tools_snapshot"
+	StateKeyToolsSnapshot = "llmflow:tools_snapshot"
 )
 
 // Options contains configuration options for creating a Flow.
@@ -437,38 +437,41 @@ func (f *Flow) getFilteredTools(ctx context.Context, invocation *agent.Invocatio
 		return nil
 	}
 
-	if cached, ok := agent.GetStateValue[[]tool.Tool](
+	var allTools []tool.Tool
+	var userToolNames map[string]bool
+	if cachedTools, ok := agent.GetStateValue[*agent.CacheTools](
 		invocation,
-		stateKeyToolsSnapshot,
-	); ok && cached != nil {
-		return cached
-	}
-
-	// Get all tools from the agent.
-	allTools := invocation.Agent.Tools()
-	if provider, ok := invocation.Agent.(ToolFilterProvider); ok {
+		StateKeyToolsSnapshot,
+	); ok && cachedTools != nil {
+		allTools = cachedTools.Tools
+		userToolNames = cachedTools.UserToolNames
+	} else if provider, ok := invocation.Agent.(ToolFilterProvider); ok {
 		allTools = provider.FilterTools(ctx)
+	} else {
+		allTools = invocation.Agent.Tools()
 	}
 
 	// If no filter is specified, return all tools for this invocation.
 	if invocation.RunOptions.ToolFilter == nil {
-		invocation.SetState(stateKeyToolsSnapshot, allTools)
 		return allTools
 	}
 
 	// Get user tools (if the agent supports it).
 	// User tools are those explicitly registered via WithTools and WithToolSets.
 	// Framework tools (Knowledge, SubAgents) are never filtered.
-	var userToolNames map[string]bool
 	hasUserToolTracking := false
-	if provider, ok := invocation.Agent.(UserToolsProvider); ok {
-		userTools := provider.UserTools()
-		hasUserToolTracking = true
-		// Build a map for fast lookup.
-		userToolNames = make(map[string]bool, len(userTools))
-		for _, t := range userTools {
-			userToolNames[t.Declaration().Name] = true
+	if len(userToolNames) == 0 {
+		if provider, ok := invocation.Agent.(UserToolsProvider); ok {
+			userTools := provider.UserTools()
+			hasUserToolTracking = true
+			// Build a map for fast lookup.
+			userToolNames = make(map[string]bool, len(userTools))
+			for _, t := range userTools {
+				userToolNames[t.Declaration().Name] = true
+			}
 		}
+	} else {
+		hasUserToolTracking = true
 	}
 
 	// Apply the filter function to each tool.
@@ -491,8 +494,6 @@ func (f *Flow) getFilteredTools(ctx context.Context, invocation *agent.Invocatio
 			filtered = append(filtered, t)
 		}
 	}
-
-	invocation.SetState(stateKeyToolsSnapshot, filtered)
 
 	return filtered
 }

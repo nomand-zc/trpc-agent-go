@@ -56,7 +56,8 @@ var (
 		// Default to rewriting same-branch lineage events to user context so
 		// that downstream agents see a consolidated user message stream unless
 		// explicitly opted into preserving assistant/tool roles.
-		PreserveSameBranch: false,
+		PreserveSameBranch:   false,
+		RefreshToolSetsOnRun: true,
 	}
 )
 

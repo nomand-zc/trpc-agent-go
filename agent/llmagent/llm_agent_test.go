@@ -23,6 +23,7 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/codeexecutor"
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/graph"
+	"trpc.group/trpc-go/trpc-agent-go/internal/flow"
 	"trpc.group/trpc-go/trpc-agent-go/internal/flow/processor"
 	"trpc.group/trpc-go/trpc-agent-go/knowledge"
 	"trpc.group/trpc-go/trpc-agent-go/knowledge/document"
@@ -141,6 +142,20 @@ func TestLLMAgent_SubAgentsReturnsCopy(t *testing.T) {
 	subAgents2 := agt.SubAgents()
 	require.Equal(t, 1, len(subAgents2))
 	require.NotNil(t, subAgents2[0])
+}
+
+// buildRequestProcessors preserves the original helper signature for tests and
+// legacy callers. It constructs a temporary agent instance and forwards to
+// buildRequestProcessorsWithAgent. Dynamic updates are not supported when using
+// this legacy function; use New() which wires the real agent for runtime getters.
+func buildRequestProcessors(name string, options *Options) []flow.RequestProcessor { // nolint:deadcode
+	dummy := &LLMAgent{
+		name:         name,
+		instruction:  options.Instruction,
+		systemPrompt: options.GlobalInstruction,
+		option:       *options,
+	}
+	return dummy.buildRequestProcessors()
 }
 
 // Test that buildRequestProcessors wires AddSessionSummary into
@@ -1189,8 +1204,9 @@ func TestSetModelByName_Concurrent(t *testing.T) {
 
 // TestInitializeModels_EmptyOptions tests initializeModels with no models.
 func TestInitializeModels_EmptyOptions(t *testing.T) {
-	opts := &Options{}
-	initialModel, models := initializeModels(opts)
+	a := New("test-agent")
+	a.initializeModels()
+	initialModel, models := a.model, a.models
 
 	require.Nil(t, initialModel)
 	require.NotNil(t, models)
@@ -1201,9 +1217,10 @@ func TestInitializeModels_EmptyOptions(t *testing.T) {
 // WithModel.
 func TestInitializeModels_OnlyWithModel(t *testing.T) {
 	model1 := newDummyModel()
-	opts := &Options{Model: model1}
+	a := New("test-agent", WithModel(model1))
+	a.initializeModels()
 
-	initialModel, models := initializeModels(opts)
+	initialModel, models := a.model, a.models
 
 	require.Equal(t, model1, initialModel)
 	require.Equal(t, 1, len(models))
@@ -1216,14 +1233,14 @@ func TestInitializeModels_OnlyWithModels(t *testing.T) {
 	model1 := newDummyModel()
 	model2 := newDummyModel()
 
-	opts := &Options{
-		Models: map[string]model.Model{
-			"model1": model1,
-			"model2": model2,
-		},
+	models := map[string]model.Model{
+		"model1": model1,
+		"model2": model2,
 	}
 
-	initialModel, models := initializeModels(opts)
+	a := New("test-agent", WithModels(models))
+	a.initializeModels()
+	initialModel, models := a.model, a.models
 
 	require.NotNil(t, initialModel)
 	require.True(t, initialModel == model1 || initialModel == model2)
@@ -1237,15 +1254,14 @@ func TestInitializeModels_BothWithModelAndModels(t *testing.T) {
 	model2 := newDummyModel()
 	model3 := newDummyModel()
 
-	opts := &Options{
-		Model: model1,
-		Models: map[string]model.Model{
-			"model2": model2,
-			"model3": model3,
-		},
+	models := map[string]model.Model{
+		"model2": model2,
+		"model3": model3,
 	}
 
-	initialModel, models := initializeModels(opts)
+	a := New("test-agent", WithModels(models), WithModel(model1))
+	a.initializeModels()
+	initialModel, models := a.model, a.models
 
 	require.Equal(t, model1, initialModel)
 	require.Equal(t, 3, len(models))
@@ -1258,15 +1274,14 @@ func TestInitializeModels_WithModelInModelsMap(t *testing.T) {
 	model1 := newDummyModel()
 	model2 := newDummyModel()
 
-	opts := &Options{
-		Model: model1,
-		Models: map[string]model.Model{
-			"model1": model1,
-			"model2": model2,
-		},
+	models := map[string]model.Model{
+		"model1": model1,
+		"model2": model2,
 	}
 
-	initialModel, models := initializeModels(opts)
+	a := New("test-agent", WithModels(models), WithModel(model1))
+	a.initializeModels()
+	initialModel, models := a.model, a.models
 
 	require.Equal(t, model1, initialModel)
 	require.Equal(t, 2, len(models))

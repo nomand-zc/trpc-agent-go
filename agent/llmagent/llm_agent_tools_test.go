@@ -71,8 +71,10 @@ func TestRegisterTools_Combinations(t *testing.T) {
 	sets := []tool.ToolSet{dummyToolSet{name: testDummyToolSetName}}
 	kb := &minimalKnowledge{}
 
+	a := New("test-agent", WithTools(base), WithToolSets(sets), WithKnowledge(kb), WithRefreshToolSetsOnRun(false))
+	a.registerTools()
 	// with tools, toolset and knowledge and nil memory.
-	tools, userToolNames := registerTools(&Options{Tools: base, ToolSets: sets, Knowledge: kb})
+	tools, userToolNames := a.tools, a.userToolNames
 	if len(tools) < 2 {
 		t.Fatalf("expected aggregated tools from base and toolset")
 	}

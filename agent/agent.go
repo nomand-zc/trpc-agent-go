@@ -102,3 +102,11 @@ type CodeExecutor interface {
 	// This allows the agent to execute code blocks in different environments.
 	CodeExecutor() codeexecutor.CodeExecutor
 }
+
+// CacheTools is a struct that contains the cached tools for an agent.
+type CacheTools struct {
+	// Tools is the list of tools that are cached for this agent.
+	Tools []tool.Tool
+	// UserTools is the map of user tools that are cached for this agent.
+	UserToolNames map[string]bool
+}
